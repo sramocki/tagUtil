@@ -1,5 +1,6 @@
 package org.tagUtil;
 
+import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -12,7 +13,6 @@ import org.jaudiotagger.tag.FieldKey;
 import org.jaudiotagger.tag.TagException;
 import org.jaudiotagger.tag.TagField;
 import org.jaudiotagger.tag.flac.FlacTag;
-import org.jaudiotagger.tag.vorbiscomment.VorbisCommentFieldKey;
 import org.tagUtil.util.AudioMethods;
 import org.tagUtil.util.FileHelper;
 
@@ -22,83 +22,136 @@ import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 public class OldMusic {
 
     private static final Logger logger = LogManager.getLogger(OldMusic.class);
+    private static final Pattern composerPattern = Pattern.compile("[0-9,()]");
 
     public static void loopDirectory(File parentFolder) {
+        if (parentFolder == null) return;
         var folders = parentFolder.listFiles();
 
+
         assert folders != null;
-        for (File folder : folders)
-        {
+        var startTime = System.currentTimeMillis();
+        for (File folder : folders) {
             try {
                 if (AudioMethods.isMultiDiscs(folder)) {
                     //TODO
                 } else {
-                   processFolder(folder);
+
+                    processFolder(folder);
+
                 }
 
             } catch (Exception e) {
                 logger.error("Error on: " + folder.getAbsolutePath(), e);
             }
         }
+        var endTime = System.currentTimeMillis();
+        logger.info("Total operation time: " + (endTime - startTime)/1000.0 + " seconds");
     }
 
-    public static void processFolder(File folder) throws CannotWriteException, CannotReadException, TagException, InvalidAudioFrameException, ReadOnlyFileException, IOException {
+    public static void processFolder(File folder) throws CannotReadException, TagException, InvalidAudioFrameException, ReadOnlyFileException, IOException, CannotWriteException {
+        var startTime = System.currentTimeMillis();
         var files = folder.listFiles();
         assert files != null;
 
-        Set<String> composerList = new HashSet<>();
-        Set<String> orchestraList = new HashSet<>();
-        Set<String> conductorList = new HashSet<>();
+        Set<String> composerSet = new HashSet<>();
+        int missingComposerCount = 0;
+        Set<String> orchestraSet = new HashSet<>();
 
-        List<File> audioFileList = Arrays
+        var audioFileList = Arrays
                 .stream(files)
                 .filter(FileHelper::isAudio)
                 .collect(Collectors.toList());
 
         if (isNotValidGenre(audioFileList.get(0))) return;
 
-        var albumArtistString = getFieldKey(audioFileList.get(0), FieldKey.ALBUM_ARTIST);
-        var albumArtistList = Arrays.asList(albumArtistString.split("; "));
+        var albumArtistList = Arrays.asList(getAlbumArtists(audioFileList.get(0)));
 
-        if (albumArtistList.size() == 1) return;
+        for (var file: audioFileList) {
 
-        for (File file: audioFileList) {
-            String rawComposerArray = getFieldKey(file, FieldKey.COMPOSER);
-            String[] composerArray = rawComposerArray.split("; ");
-            composerList.addAll(Arrays.asList(composerArray));
+            var currentComposer = getFieldKey(file, FieldKey.COMPOSER);
+            if (StringUtils.isEmpty(currentComposer)) {
+                missingComposerCount++;
+            } else {
+                composerSet.add(currentComposer);
+            }
+            orchestraSet.add(getFieldKey(file, FieldKey.ORCHESTRA));
+        }
 
-            String rawOrchestraArray = getFieldKey(file, FieldKey.ORCHESTRA);
-            String[] orchestraArray = rawOrchestraArray.split("; ");
-            orchestraList.addAll(Arrays.asList(orchestraArray));
+        if (missingComposerCount > 0 || albumArtistList.size() <= 2 && albumArtistList.containsAll(composerSet) || albumArtistList.containsAll(composerSet) && !albumArtistList.containsAll(orchestraSet)) {
+            logger.info("Skipping " + folder.getName());
+            for(int i = 0; i < audioFileList.size(); i++) {
+                audioFileList.set(i, NewMusic.cleanUpAudioFile(audioFileList.get(i)));
+            }
+            return;
         }
 
         albumArtistList = albumArtistList
                 .stream()
                 .filter(e -> !e.isEmpty())
-                .filter(e -> !orchestraList.contains(e))
+                .filter(e -> !orchestraSet.contains(e))
+                .filter(e -> !composerSet.contains(e))
                 .collect(Collectors.toList());
+
+        if (composerSet.size() < 4 && isValidComposerList(composerSet)) {
+            albumArtistList.addAll(composerSet);
+        }
+
+        logger.debug(composerSet.size());
+        logger.debug("Writing the artists: " + String.join(", ", albumArtistList));
 
         for(File file : audioFileList) {
            correctTags(file, albumArtistList.toArray(String[]::new));
         }
+
+        var endTime = System.currentTimeMillis();
+        logger.info("Folder [" + folder.getName() + "] operation time: " + (endTime - startTime)/1000.0 + " seconds");
+    }
+
+    private static String[] getAlbumArtists(File file) throws CannotReadException, TagException, InvalidAudioFrameException, ReadOnlyFileException, IOException {
+        var audioFile = AudioFileIO.read(file);
+        FlacTag tag = (FlacTag) audioFile.getTag();
+        return tag.getFields(FieldKey.ALBUM_ARTIST)
+                .stream()
+                .map(TagField::toString)
+                .distinct()
+                .toArray(String[]::new);
     }
 
     private static String getFieldKey(File file, FieldKey fieldKey) throws CannotReadException, TagException, InvalidAudioFrameException, ReadOnlyFileException, IOException {
         var audioFile = AudioFileIO.read(file);
         FlacTag tag = (FlacTag) audioFile.getTag();
-        List<TagField> composerList = tag.getFields(fieldKey);
-        if (composerList.size() == 1) {
-            return composerList.get(0).toString();
+        return tag.getFirst(fieldKey);
+    }
+
+    private static boolean isValidComposerList(Set<String> list) {
+        if (list.isEmpty()) {
+            return false;
         } else {
-            return composerList.stream()
-                    .map(TagField::toString)
-                    .collect(Collectors.joining("; "));
+            for (var composer: list) {
+                if (!isValidComposer(composer)) {
+                    return false;
+                }
+            }
         }
+
+        return true;
+    }
+
+    private static boolean isValidComposer(String composer) {
+        var status = true;
+        if (composer.isEmpty()) {
+            status = false;
+        } else if (composerPattern.matcher(composer).find()) {
+            status = false;
+        }
+        return status;
     }
 
     private static boolean isNotValidGenre(File file) throws CannotReadException, TagException, InvalidAudioFrameException, ReadOnlyFileException, IOException {
@@ -110,20 +163,18 @@ public class OldMusic {
     }
 
     private static void correctTags(File file, String[] albumArtistArray) throws CannotReadException, TagException, InvalidAudioFrameException, ReadOnlyFileException, IOException, CannotWriteException {
+        file = NewMusic.cleanUpAudioFile(file);
+
         var audioFile = AudioFileIO.read(file);
         FlacTag tag = (FlacTag) audioFile.getTag();
 
-        String composer = tag.getFirst(FieldKey.COMPOSER);
-        if (StringUtils.isEmpty(composer)) {
-            tag.setField(FieldKey.COMPOSER, "`missing`");
-            audioFile.commit();
-        }
+        if (ArrayUtils.isNotEmpty(albumArtistArray)) {
+            tag.deleteField(FieldKey.ALBUM_ARTIST);
 
-        tag.deleteField(FieldKey.ALBUM_ARTIST);
-
-        for (String val : albumArtistArray) {
-            tag.addField(FieldKey.ALBUM_ARTIST, val);
-            audioFile.commit();
+            for (String val : albumArtistArray) {
+                tag.addField(FieldKey.ALBUM_ARTIST, val);
+                audioFile.commit();
+            }
         }
     }
 }

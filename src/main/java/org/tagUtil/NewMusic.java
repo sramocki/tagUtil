@@ -1,10 +1,10 @@
 package org.tagUtil;
 
+import org.apache.commons.collections4.Trie;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
-import org.jaudiotagger.audio.AudioFile;
 import org.jaudiotagger.audio.AudioFileIO;
 import org.jaudiotagger.audio.exceptions.CannotReadException;
 import org.jaudiotagger.audio.exceptions.CannotWriteException;
@@ -16,14 +16,17 @@ import org.jaudiotagger.tag.flac.FlacTag;
 import org.tagUtil.util.AudioMethods;
 import org.tagUtil.util.FileHelper;
 import org.tagUtil.util.Format;
-import org.tagUtil.util.RegexMatches;
 
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.SortedMap;
+
+import static org.tagUtil.Window.getComposerTrie;
 
 public class NewMusic {
 
@@ -112,17 +115,20 @@ public class NewMusic {
         Files.move(source, source.resolveSibling(newFolderName));
     }
 
-    public static void cleanUpAudioFile(File file) throws CannotReadException, TagException, InvalidAudioFrameException, ReadOnlyFileException, IOException, CannotWriteException {
-        AudioFile audioFile = AudioFileIO.read(file);
+    public static File cleanUpAudioFile(File file) throws CannotReadException, TagException, InvalidAudioFrameException, ReadOnlyFileException, IOException, CannotWriteException {
+        var commit = false;
+        var audioFile = AudioFileIO.read(file);
         FlacTag tag = (FlacTag) audioFile.getTag();
 
-        tag.deleteArtworkField();
-        tag.deleteField(FieldKey.COMMENT);
+        logger.debug("Processing: " + file.getName());
 
-        String track = tag.getFirst(FieldKey.TRACK);
+        var track = tag.getFirst(FieldKey.TRACK);
         track = track.replaceAll("/.*", "");
         tag.setField(FieldKey.TRACK, StringUtils.leftPad(track, 2, "0"));
-
+        tag.setField(FieldKey.DISC_NO, "1");
+        audioFile.commit();
+        tag.deleteArtworkField();
+        tag.deleteField(FieldKey.COMMENT);
         tag.deleteField(FieldKey.MUSICIP_ID);
         tag.deleteField(FieldKey.MUSICBRAINZ_DISC_ID);
         tag.deleteField(FieldKey.MUSICBRAINZ_TRACK_ID);
@@ -141,19 +147,88 @@ public class NewMusic {
         tag.deleteField(FieldKey.ACOUSTID_FINGERPRINT);
         audioFile.commit();
 
-        String outputTitle = tag.getFirst(FieldKey.TITLE).replaceAll(FileHelper.ILLEGAL_REGEX, "");
-        if (outputTitle.length() > 150) {
-            outputTitle = outputTitle.substring(0, 150);
+        var trackTitle = tag.getFirst(FieldKey.TITLE);
+
+        if (trackTitle.contains(":")) {
+            var composer = tag.getFirst(FieldKey.COMPOSER);
+            var trackSplitByColons = trackTitle.split(":");
+            var cleanupStart = false;
+
+            // Cleanup missing composers in titles
+            if (StringUtils.isEmpty(composer)) {
+                var missingComposer = "`missing`";
+                var partialComposer = trackSplitByColons[0];
+                logger.debug("Found a partial composer: " + partialComposer);
+                missingComposer = findComposerFromPartial(partialComposer.toLowerCase());
+                if (!"`missing`".equals(missingComposer)) {
+                    tag.setField(FieldKey.COMPOSER, missingComposer);
+                    cleanupStart = true;
+                }
+            }
+
+            trackTitle = tag.getFirst(FieldKey.TITLE);
+            var firstColonIndex = trackTitle.indexOf(":");
+            var firstSpaceIndex = trackTitle.indexOf(StringUtils.SPACE);
+
+            // Cleanup colon in the start of a track title
+            if (cleanupStart || firstColonIndex < firstSpaceIndex) {
+                tag.setField(FieldKey.TITLE, trackTitle.substring(firstColonIndex + 2));
+                audioFile.commit();
+                commit = true;
+            }
+
+            trackTitle = tag.getFirst(FieldKey.TITLE);
+            var lastColonIndex = trackTitle.lastIndexOf(":");
+            firstSpaceIndex = trackTitle.indexOf(StringUtils.SPACE);
+
+            // Cleanup colon in the end of a track title
+            if (lastColonIndex > firstSpaceIndex) {
+                var trackArray = trackTitle.substring(0, lastColonIndex).split(" ");
+                var movementString = trackArray[trackArray.length-1];
+                List<String> movementList = Arrays.asList("Aria", "Chorus", "Duetto", "Terzetto");
+                if (!movementList.contains(movementString)) {
+                    trackTitle = trackTitle.substring(0, lastColonIndex) + " -" + trackTitle.substring(lastColonIndex + 1);
+                    tag.setField(FieldKey.TITLE, trackTitle);
+                    audioFile.commit();
+                    commit = true;
+                }
+            }
         }
 
-        // Create a Pattern object
+        trackTitle = tag.getFirst(FieldKey.TITLE);
 
-        Pattern pattern1 = Pattern.compile(RegexMatches.MOVEMENT_PATTERN, Pattern.CASE_INSENSITIVE);
-        Matcher matcher = pattern1.matcher(outputTitle);
-        if (matcher.find()) {
-            String newTitle = matcher.replaceFirst("$1");
+        // Cleanup track title length
+        String outputTitle = trackTitle.replaceAll(FileHelper.ILLEGAL_REGEX, "-");
+        if (outputTitle.length() > 100) {
+            logger.warn("Output title exceeded 100 characters!");
+            commit = true;
+            outputTitle = outputTitle.substring(0, 100);
+            logger.debug("Updated title to: " + outputTitle);
         }
 
-        FileHelper.renameFile(file, tag.getFirst(FieldKey.TRACK) + " - " + outputTitle + "." + Format.FLAC);
+        track = tag.getFirst(FieldKey.TRACK);
+        String finalPath = track + " - " + outputTitle + "." + Format.FLAC;
+        String finalFullPath = file.getParent() + File.separator + finalPath;
+
+        // Rename track filename if needed
+        if (commit || !file.getAbsolutePath().equals(finalFullPath)) {
+            logger.debug("Updated filename to: " + finalPath);
+            FileHelper.renameFile(file, finalPath);
+
+            file = new File(finalFullPath);
+            logger.info("Updated: " + file.getName());
+        }
+        return file;
+    }
+
+    public static String findComposerFromPartial(String partialComposer) {
+        var composer = "`missing`";
+        Trie<String, String> composerTrie = getComposerTrie();
+        SortedMap<String, String> prefixMap = composerTrie.prefixMap(partialComposer);
+        for (Map.Entry<String, String> entry : prefixMap.entrySet()) {
+            composer = entry.getValue();
+            logger.debug("Matched composer to: " + composer);
+        }
+        return composer;
     }
 }
