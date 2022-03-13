@@ -1,7 +1,5 @@
-package org.tagUtil;
+package org.tagUtil.service;
 
-import org.apache.commons.collections4.Trie;
-import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -13,106 +11,28 @@ import org.jaudiotagger.audio.exceptions.ReadOnlyFileException;
 import org.jaudiotagger.tag.FieldKey;
 import org.jaudiotagger.tag.TagException;
 import org.jaudiotagger.tag.flac.FlacTag;
-import org.tagUtil.util.AudioMethods;
+import org.tagUtil.constants.Format;
+import org.tagUtil.constants.RegexMatches;
 import org.tagUtil.util.FileHelper;
-import org.tagUtil.util.Format;
+import org.tagUtil.util.TagHelper;
 
 import java.io.File;
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.List;
-import java.util.Map;
-import java.util.SortedMap;
+import java.util.Objects;
+import java.util.stream.Collectors;
 
-import static org.tagUtil.Window.getComposerTrie;
+public class AudioMethods {
 
-public class NewMusic {
+    private static final Logger logger = LogManager.getLogger(AudioMethods.class);
 
-    private static final Logger logger = LogManager.getLogger(NewMusic.class);
-
-    public static void loopDirectory(File parentFolder) {
-        File[] folders = parentFolder.listFiles();
-
-        assert folders != null;
-        //TODO cleanup empty hard folder
-        createHardFolder(parentFolder);
-        for (File folder : folders)
-        {
-            try {
-                if (AudioMethods.isMultiDiscs(folder)) {
-                    logger.info("*** SKIPPING ***: " + folder.getName());
-                    moveToHardFolder(parentFolder,folder);
-                    //TODO Handle: disc vs CD vs numbering
-                } else if (!folder.getName().equals("HardFolder")) {
-                    extractArtFiles(folder);
-                    processFolder(folder);
-                }
-
-            } catch (Exception e) {
-                logger.error("Error on: " + folder.getAbsolutePath(), e);
-            }
-        }
-    }
-
-    /**
-     * If a subfolder named 'Art' exists, then move its contents up a folder and remove the 'Art' folder.
-     * @param folder
-     */
-    private static void extractArtFiles(File folder) {
-        var artFolder = new File(folder.getAbsolutePath() + File.separatorChar + "Art");
-        if (artFolder.exists()) {
-            logger.debug("FOUND ART! on " + folder.getAbsolutePath());
-            for (File file : artFolder.listFiles()) {
-                file.renameTo(new File(artFolder.getParent() + File.separator + file.getName()));
-            }
-            artFolder.delete();
-        }
-    }
-
-
-
-    private static void createHardFolder(File folder) {
-        File directory = new File(folder.getAbsolutePath() + File.separator + "HardFolder");
-        if (!directory.exists()) {
-            directory.mkdir();
-        }
-    }
-
-    private static void moveToHardFolder(File parentFolder, File folder) {
-        var newDir = new File(parentFolder + File.separator + "HardFolder" + File.separator + folder.getName());
-        try {
-            FileUtils.moveDirectory(folder, newDir);
-        } catch (Exception e) {
-            logger.error("Exception! ", e);
-        }
-    }
-
-    public static void processFolder(File folder) throws CannotWriteException, CannotReadException, TagException, InvalidAudioFrameException, ReadOnlyFileException, IOException {
-        File[] files = folder.listFiles();
-        assert files != null;
-
-        for (File file : files) {
-            if (FileHelper.isImage(file)) {
-                FileHelper.handleImage(file);
-            } else if (FileHelper.isJunk(file)){
-                file.delete();
-            } else if (FileHelper.isAudio(file)) {
-                cleanUpAudioFile(file);
-            }
-        }
-
-        var tag = FileHelper.getFirstTag(folder);
-        var source = Paths.get(folder.getAbsolutePath());
-        assert tag != null;
-
-        // Rename the folder name to match: (YEAR) ALBUM_NAME
-        var newFolderName = "(" + tag.getFirst(FieldKey.YEAR) + ")" + StringUtils.SPACE + tag.getFirst(FieldKey.ALBUM);
-
-        // Remove illegal characters on Windows OS
-        newFolderName = newFolderName.replaceAll(FileHelper.ILLEGAL_REGEX, StringUtils.EMPTY);
-        Files.move(source, source.resolveSibling(newFolderName));
+    // TODO rewrite
+    public static boolean isMultiDiscs(File folder) {
+        List<File> fileList = Arrays.stream(Objects.requireNonNull(folder.listFiles()))
+                .filter(File::isDirectory)
+                .collect(Collectors.toList());
+        return fileList.size() > 1;
     }
 
     public static File cleanUpAudioFile(File file) throws CannotReadException, TagException, InvalidAudioFrameException, ReadOnlyFileException, IOException, CannotWriteException {
@@ -159,7 +79,7 @@ public class NewMusic {
                 var missingComposer = "`missing`";
                 var partialComposer = trackSplitByColons[0];
                 logger.debug("Found a partial composer: " + partialComposer);
-                missingComposer = findComposerFromPartial(partialComposer.toLowerCase());
+                missingComposer = TagHelper.findComposerFromPartial(partialComposer.toLowerCase());
                 if (!"`missing`".equals(missingComposer)) {
                     tag.setField(FieldKey.COMPOSER, missingComposer);
                     cleanupStart = true;
@@ -198,7 +118,7 @@ public class NewMusic {
         trackTitle = tag.getFirst(FieldKey.TITLE);
 
         // Cleanup track title length
-        String outputTitle = trackTitle.replaceAll(FileHelper.ILLEGAL_REGEX, "-");
+        String outputTitle = trackTitle.replaceAll(RegexMatches.ILLEGAL_REGEX_DASH, "-").replaceAll(RegexMatches.ILLEGAL_REGEX_BLANK, StringUtils.EMPTY);
         if (outputTitle.length() > 100) {
             logger.warn("Output title exceeded 100 characters!");
             commit = true;
@@ -217,18 +137,9 @@ public class NewMusic {
 
             file = new File(finalFullPath);
             logger.info("Updated: " + file.getName());
+        } else {
+            logger.debug("Skipped: " + file.getName());
         }
         return file;
-    }
-
-    public static String findComposerFromPartial(String partialComposer) {
-        var composer = "`missing`";
-        Trie<String, String> composerTrie = getComposerTrie();
-        SortedMap<String, String> prefixMap = composerTrie.prefixMap(partialComposer);
-        for (Map.Entry<String, String> entry : prefixMap.entrySet()) {
-            composer = entry.getValue();
-            logger.debug("Matched composer to: " + composer);
-        }
-        return composer;
     }
 }

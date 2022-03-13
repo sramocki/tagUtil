@@ -3,6 +3,8 @@ package org.tagUtil;
 import org.apache.commons.collections4.Trie;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.tagUtil.type.NewMusic;
+import org.tagUtil.type.OldMusic;
 import org.tagUtil.util.Lookup;
 
 import javax.swing.JButton;

@@ -1,4 +1,4 @@
-package org.tagUtil;
+package org.tagUtil.type;
 
 import org.apache.commons.lang3.ArrayUtils;
 import org.apache.commons.lang3.StringUtils;
@@ -13,8 +13,8 @@ import org.jaudiotagger.tag.FieldKey;
 import org.jaudiotagger.tag.TagException;
 import org.jaudiotagger.tag.TagField;
 import org.jaudiotagger.tag.flac.FlacTag;
-import org.tagUtil.util.AudioMethods;
-import org.tagUtil.util.FileHelper;
+import org.tagUtil.constants.Format;
+import org.tagUtil.service.AudioMethods;
 
 import java.io.File;
 import java.io.IOException;
@@ -42,9 +42,7 @@ public class OldMusic {
                 if (AudioMethods.isMultiDiscs(folder)) {
                     //TODO
                 } else {
-
                     processFolder(folder);
-
                 }
 
             } catch (Exception e) {
@@ -66,7 +64,7 @@ public class OldMusic {
 
         var audioFileList = Arrays
                 .stream(files)
-                .filter(FileHelper::isAudio)
+                .filter(Format::isAudio)
                 .collect(Collectors.toList());
 
         if (isNotValidGenre(audioFileList.get(0))) return;
@@ -85,9 +83,9 @@ public class OldMusic {
         }
 
         if (missingComposerCount > 0 || albumArtistList.size() <= 2 && albumArtistList.containsAll(composerSet) || albumArtistList.containsAll(composerSet) && !albumArtistList.containsAll(orchestraSet)) {
-            logger.info("Skipping " + folder.getName());
+            logger.info("Skipping updating album artists on " + folder.getName());
             for(int i = 0; i < audioFileList.size(); i++) {
-                audioFileList.set(i, NewMusic.cleanUpAudioFile(audioFileList.get(i)));
+                audioFileList.set(i, AudioMethods.cleanUpAudioFile(audioFileList.get(i)));
             }
             return;
         }
@@ -104,7 +102,7 @@ public class OldMusic {
         }
 
         logger.debug(composerSet.size());
-        logger.debug("Writing the artists: " + String.join(", ", albumArtistList));
+        logger.info("Writing the artists: " + String.join(", ", albumArtistList) + " to ["  + folder.getName() + "]");
 
         for(File file : audioFileList) {
            correctTags(file, albumArtistList.toArray(String[]::new));
@@ -163,7 +161,7 @@ public class OldMusic {
     }
 
     private static void correctTags(File file, String[] albumArtistArray) throws CannotReadException, TagException, InvalidAudioFrameException, ReadOnlyFileException, IOException, CannotWriteException {
-        file = NewMusic.cleanUpAudioFile(file);
+        file = AudioMethods.cleanUpAudioFile(file);
 
         var audioFile = AudioFileIO.read(file);
         FlacTag tag = (FlacTag) audioFile.getTag();

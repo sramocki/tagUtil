@@ -11,7 +11,9 @@ import java.util.SortedMap;
 
 //TODO
 /**
- *
+ * Correct grammar
+ * Translate
+ * Add missing movement numerals
  * Multiple discs
  * Error reporting for missing tags
  * Handle A-Z structure for output
